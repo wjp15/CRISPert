@@ -4,7 +4,7 @@ import random
 import os
 import logging
 import json
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, SequentialSampler, TensorDataset, WeightedRandomSampler
 from tqdm import tqdm, trange
 from transformers.modeling_bert import BertForSequenceClassificationFeatures,BertForSequenceClassificationFeatures2
 from transformers import(
@@ -29,32 +29,31 @@ MODEL_CLASSES = {
 }
 
 
-cfg = {"data_dir":"data/data_sc1/splitseed42",
-        "model_type":"dna",
-        "n_process":1,
-        "model_name_or_path":"pretrained_model/pretrained_vertical3/checkpoint-38950",
-        "task_name":"dnaprom",
-        "max_seq_length": 23 ,
-        "per_gpu_eval_batch_size":300 ,
-
-        "per_gpu_train_batch_size": 200,
-        "pred_batch_size":200,
-        "learning_rate": 2e-4 ,
-        "num_train_epochs": 50 ,
-        "logging_steps": 1 ,
-        "save_steps": 0 ,
-        "warmup_percent": 0.1 ,
-        "hidden_dropout_prob": 0.1 ,
-        "attention_probs_dropout_prob": 0.1,
-        "weight_decay": 0.01 ,
-        "n_samples_dataset": 1000,
-        "early_stops": 15 ,
-        "save_total_limits": 1 ,
-        "gradient_accumulation_steps": 3,
-        "adam_epsilon":1e-8,
-        "beta1":0.9,
-        "beta2":0.999,
-        }
+cfg = {
+    "data_dir":"data/data_newsplit3_42",
+    "model_type":"dna",
+    "model_name_or_path":"pretrained_model/checkpoint-38950",
+    "task_name":"dnaprom",
+    "max_seq_length": 23 ,
+    "per_gpu_eval_batch_size":300 ,
+    "per_gpu_train_batch_size": 200,
+    "pred_batch_size":200,
+    "learning_rate": 2e-4 ,
+    "num_train_epochs": 15,
+    "logging_steps": 1 ,
+    "warmup_percent": 0.1 ,
+    "hidden_dropout_prob": 0.1 ,
+    "attention_probs_dropout_prob": 0.1,
+    "weight_decay": 0.01 ,
+    "n_samples_dataset": 1000,
+    "save_total_limits": 1 ,
+    "gradient_accumulation_steps": 3,
+    "adam_epsilon":1e-8,
+    "beta1":0.9,
+    "beta2":0.999,
+    "output_dir": "simple_test",
+    "patience": 15
+    }
 
 def set_seed(seed):
     random.seed(seed)
@@ -62,7 +61,7 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
-def load_and_cache_examples(cfg, task, tokenizer, evaluate=False,do_predict=False):
+def load_and_cache_examples(cfg, task, tokenizer, evaluate=False,do_predict=False,pred_dir =""):
 
     processor = processors[task]()
     output_mode = output_modes[task]
@@ -78,9 +77,9 @@ def load_and_cache_examples(cfg, task, tokenizer, evaluate=False,do_predict=Fals
     )
     if do_predict==True:
         cached_features_file = os.path.join(
-            cfg["data_dir"],
+            cfg["data_dir"],pred_dir,
             "cached_{}_{}_{}".format(
-                "dev" if evaluate else "train",
+                "dev",
                 str(cfg["max_seq_length"]),
                 str(task),
             ),
@@ -133,9 +132,8 @@ def load_and_cache_examples(cfg, task, tokenizer, evaluate=False,do_predict=Fals
 
 def train(cfg,model,tokenizer):
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_dataset = load_and_cache_examples(cfg, cfg["task_name"], tokenizer, evaluate=False)
-
-
     train_weights = []     
     for i in range(len(train_dataset)):
         if train_dataset[i][3].item() == 0:
@@ -143,8 +141,6 @@ def train(cfg,model,tokenizer):
         else:
             train_weights.append(1/525)
 
-    #train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset) 
-    #train_sampler = WeightedRandomSampler(weights=train_weights,num_samples=len(train_dataset),replacement=True)
     train_sampler = WeightedRandomSampler(weights=train_weights,num_samples=cfg["n_samples_dataset"],replacement=True)
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=cfg["per_gpu_train_batch_size"])
 
@@ -188,12 +184,12 @@ def train(cfg,model,tokenizer):
     
     model.zero_grad()
     train_iterator = trange(epochs_trained, int(cfg["num_train_epochs"]), desc="Epoch")
-    set_seed(42)  # Added here for reproductibility
+    set_seed(42)  
 
-    # best_auc = 0
-    # best_aucpr = 0
-    # last_auc = 0
-    # stop_count = 0
+    best_aucpr = 0
+    stop_count = 0
+    best_model_state_dict = None
+    best_tokenizer = None       
 
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
@@ -207,7 +203,7 @@ def train(cfg,model,tokenizer):
 
             outputs = model(**inputs)
          
-            loss = outputs[0]  
+            loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
             logits = outputs[1]
             if preds is None:
                     preds = logits.detach().cpu().numpy()
@@ -235,6 +231,7 @@ def train(cfg,model,tokenizer):
                     logs = {}
 
                     results, eval_acc, eval_loss, aucpr = evaluate(cfg, model, tokenizer)
+  
 
                     for key, value in results.items():
                         eval_key = "eval_{}".format(key)
@@ -249,8 +246,52 @@ def train(cfg,model,tokenizer):
 
                     print(json.dumps({**logs, **{"step": global_step}}))
 
-         
-                  
+
+                    if cfg["patience"] != 0:
+                     
+                        if results["auc-pr"] <= best_aucpr:
+                            stop_count += 1
+                            print(f"############## stop count ({stop_count}) #############")
+                
+                        else:
+                            best_aucpr = results["auc-pr"]
+                            stop_count = 0
+                            print(f"############# new best ({best_aucpr}) auc-pr #############")
+
+                            #Save model checkpoint
+
+                            # output_dir = os.path.join(cfg["output_dir"], "best_model")
+                            # if not os.path.exists(output_dir):
+                            #     os.makedirs(output_dir)
+                            # model.save_pretrained(output_dir)
+                            # tokenizer.save_pretrained(output_dir)
+
+                            best_model_state_dict = model.state_dict()
+                            best_tokenizer = tokenizer
+
+                        if stop_count == cfg["patience"]:
+                            logger.info("Early stop")
+
+
+                            output_dir = os.path.join(cfg["output_dir"], "best_model")
+                            if not os.path.exists(output_dir):
+                                os.makedirs(output_dir)
+                            model.load_state_dict(best_model_state_dict)
+                            model.save_pretrained(output_dir)
+                            best_tokenizer.save_pretrained(output_dir)
+                            return 
+
+
+
+
+
+    
+    if best_model_state_dict is not None and best_tokenizer is not None:
+        output_dir = os.path.join(cfg["output_dir"], "best_model")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
     return 
 
 def evaluate(cfg, model, tokenizer, prefix="", evaluate=True):
@@ -278,10 +319,6 @@ def evaluate(cfg, model, tokenizer, prefix="", evaluate=True):
 
         with torch.no_grad():
             inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
-            # if args.model_type != "distilbert":
-            #     inputs["token_type_ids"] = (
-            #         batch[2] if args.model_type in TOKEN_ID_GROUP else None
-            #     )  # XLM, DistilBERT, RoBERTa, and XLM-RoBERTa don't use segment_ids
             outputs = model(**inputs)
             tmp_eval_loss, logits = outputs[:2]
             eval_loss += tmp_eval_loss.mean().item()
@@ -314,28 +351,17 @@ def evaluate(cfg, model, tokenizer, prefix="", evaluate=True):
 
 
 
-def predict(cfg, tokenizer, prefix=""):
+def predict(cfg,model, tokenizer, pred_dir, prefix=""):
 
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # pred_task_names = (args.task_name,)
-    # pred_outputs_dirs = (args.predict_dir,)
-    # if not os.path.exists(args.predict_dir):
-    #     os.makedirs(args.predict_dir)
     softmax = torch.nn.Softmax(dim=1)
     
-    tokenizer = tokenizer_class.from_pretrained(
-        "dna7",
-        do_lower_case=False,
-        cache_dir=None,
-    )
 
     predictions = {}
     pred_task = cfg["task_name"]
-    pred_dataset = load_and_cache_examples(cfg, pred_task, tokenizer, evaluate=True,do_predict=True)
+    pred_dataset = load_and_cache_examples(cfg, pred_task, tokenizer, evaluate=True,do_predict=True,pred_dir=pred_dir)
     
-    # if not os.path.exists(pred_output_dir):
-    #     os.makedirs(pred_output_dir)
+
  
     pred_sampler = SequentialSampler(pred_dataset)
     pred_dataloader = DataLoader(pred_dataset, sampler=pred_sampler, batch_size=cfg["pred_batch_size"])
@@ -374,10 +400,12 @@ def predict(cfg, tokenizer, prefix=""):
 
     result = compute_metrics(pred_task, preds, out_label_ids, probs)
     print(result)
+
     # pred_output_dir = args.predict_dir
     # if not os.path.exists(pred_output_dir):
     #         os.makedir(pred_output_dir)
     # output_pred_file = os.path.join(pred_output_dir, "pred_results.npy")
+
     logger.info("***** Pred results {} *****".format(prefix))
     for key in sorted(result.keys()):
         logger.info("  %s = %s", key, str(result[key]))
@@ -385,52 +413,60 @@ def predict(cfg, tokenizer, prefix=""):
 
 
 
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    logging.basicConfig(
+            format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
+            datefmt="%m/%d/%Y %H:%M:%S",
+            level=logging.INFO
+        )
+
+    set_seed(42)
+
+    # Prepare GLUE task
+    cfg["task_name"] = cfg["task_name"].lower()
+    if cfg["task_name"] not in processors:
+        raise ValueError("Task not found: %s" % (cfg["task_name"]))
+    processor = processors[cfg["task_name"]]()
+    label_list = processor.get_labels()
+    num_labels = len(label_list)
+
+    # Load pretrained model and tokenizer
+    cfg["model_type"] = cfg["model_type"].lower()
+    config_class, model_class, tokenizer_class = MODEL_CLASSES[cfg["model_type"]]
 
 
+    config = config_class.from_pretrained(
+        cfg["model_name_or_path"],
+        num_labels=num_labels,
+        finetuning_task=cfg["task_name"],
+        cache_dir=None,
+    )
 
-############################train and pred ############################
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config.hidden_dropout_prob = cfg["hidden_dropout_prob"]
+    config.attention_probs_dropout_prob = cfg["attention_probs_dropout_prob"]
 
-    # Set seed
-set_seed(42)
+    tokenizer = tokenizer_class.from_pretrained(
+        "dna7",
+        do_lower_case=False,
+        cache_dir=None,
+    )
+    model = model_class.from_pretrained(
+        cfg["model_name_or_path"],
+        from_tf=bool(".ckpt" in cfg["model_name_or_path"]),
+        config=config,
+        cache_dir=None,
+    )
 
-# Prepare GLUE task
-cfg["task_name"] = cfg["task_name"].lower()
-if cfg["task_name"] not in processors:
-    raise ValueError("Task not found: %s" % (cfg["task_name"]))
-processor = processors[cfg["task_name"]]()
-label_list = processor.get_labels()
-num_labels = len(label_list)
+    model.to(device)
 
-# Load pretrained model and tokenizer
-cfg["model_type"] = cfg["model_type"].lower()
-config_class, model_class, tokenizer_class = MODEL_CLASSES[cfg["model_type"]]
+    train(cfg,model,tokenizer)
+    predict(cfg,model,tokenizer,pred_dir="hek293t_test")
+    predict(cfg,model,tokenizer,pred_dir="k562_test")
+
+    return
 
 
-config = config_class.from_pretrained(
-    cfg["model_name_or_path"],
-    num_labels=num_labels,
-    finetuning_task=cfg["task_name"],
-    cache_dir=None,
-)
-
-config.hidden_dropout_prob = cfg["hidden_dropout_prob"]
-config.attention_probs_dropout_prob = cfg["attention_probs_dropout_prob"]
-
-tokenizer = tokenizer_class.from_pretrained(
-    "dna7",
-    do_lower_case=False,
-    cache_dir=None,
-)
-model = model_class.from_pretrained(
-    cfg["model_name_or_path"],
-    from_tf=bool(".ckpt" in cfg["model_name_or_path"]),
-    config=config,
-    cache_dir=None,
-)
-
-model.to(device)
-
-train(cfg,model,tokenizer)
-
-predict(cfg,tokenizer)
+if __name__ == "__main__":
+    main()
