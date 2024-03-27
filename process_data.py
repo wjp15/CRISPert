@@ -4,6 +4,13 @@ from sklearn.model_selection import train_test_split
 from pathlib import Path
 import os
 
+def string_to_list(s):
+    s = s.strip('[]')
+    if s:
+        return [int(x) for x in s.split(',') if x.strip()]  
+    else:
+        return []
+
 def seq2kmer(seq, k):
     """
     Convert original sequence to kmers
@@ -40,10 +47,19 @@ def encode_seq(target,off_target):
    
     return(new_seq)
 
+def scores2kmerscores(scores):
+    
+    kscores = [int((scores[x]+scores[x+1]+scores[x+2])/3) for x in range(len(scores)+1-3)]
+    # add 0 at start and end to account for cls and sep token
+    kscores.append(0)
+    kscores.insert(0, 0)
+    return kscores
  
 
 def gen_random_split(seed,k):
-    
+
+    # Generate a random 80:20 split of both cell types, this the same split used test scenario 1 in the deepcrispr paper
+
     df1 = pd.read_csv("DeepCRISPR_dataset/k562.epiotrt",sep="\t",header=None)
 
     df1.columns = ["Id","Target Seq","Target CTCF","Target Dnase","Target H3K4me3","Target RRBS","Off-target Seq","Off-target CTCF","Off-target Dnase","Off-target H3K4me3","Off-target RRBS","Label"]
@@ -114,4 +130,122 @@ def gen_random_split(seed,k):
 
     return
 
-gen_random_split(42,3)
+
+
+
+def prep_data_LeaveOneOut():
+
+    hek239t = pd.read_csv("DeepCRISPR_dataset/hek293t.epiotrt",sep="\t",header=None)
+    k562 = pd.read_csv("DeepCRISPR_dataset/k562.epiotrt",sep="\t",header=None)
+
+    hek239t.columns = ["Id","Target Seq","Target CTCF","Target Dnase","Target H3K4me3","Target RRBS","Off-target Seq","Off-target CTCF","Off-target Dnase","Off-target H3K4me3","Off-target RRBS","Label"]
+    k562.columns = ["Id","Target Seq","Target CTCF","Target Dnase","Target H3K4me3","Target RRBS","Off-target Seq","Off-target CTCF","Off-target Dnase","Off-target H3K4me3","Off-target RRBS","Label"]
+
+    # add cell identifier to sgRNA id
+    k562["Id"] = k562["Id"] + "k"
+    hek239t["Id"] = hek239t["Id"] + "h"
+
+
+    # combine target + off target
+    #####################################################
+    condensed_hek239t = hek239t[["Id","Target Seq","Off-target Seq","Label"]]
+    condensed_hek239t["comb"]  = condensed_hek239t.apply(lambda x: encode_seq(x["Target Seq"],x["Off-target Seq"]),axis=1)
+
+
+
+    condensed_k562 = k562[["Id","Target Seq","Off-target Seq","Label"]]
+    condensed_k562["comb"]  = condensed_k562.apply(lambda x: encode_seq(x["Target Seq"],x["Off-target Seq"]),axis=1)
+
+
+
+    combined = pd.concat([condensed_k562,condensed_hek239t])
+    combined = combined[["Id","comb","Label"]]
+    combined = combined.drop_duplicates()
+    combined["comb"] = combined.apply(lambda x: seq2kmer(x["comb"],3),axis=1)
+
+    # rename all sg8k to sg1h as they have the same target sequence
+    combined['Id'] = combined['Id'].replace('sg8k', 'sg1h')
+
+    combined = combined.drop_duplicates()
+    unique_values = combined['Id'].unique()
+
+
+    print(unique_values)
+
+    for sgrna in unique_values:
+
+        print(sgrna)
+        combined_test = combined[(combined["Id"] == sgrna)]
+        combined_train = combined[(combined["Id"] != sgrna)]
+
+        combined_train.drop('Id', axis=1, inplace=True)
+        combined_test.drop('Id', axis=1, inplace=True)
+
+        train, val = train_test_split(combined_train, test_size=0.2, random_state=42, stratify=combined_train["Label"])
+
+
+
+        if not os.path.exists("data/leave_one_out_testing/" + str(sgrna) + "/test"):
+            os.makedirs("data/leave_one_out_testing/" + str(sgrna) + "/test", exist_ok=True)
+
+            
+        train.to_csv("data/leave_one_out_testing/" + str(sgrna) + "/train.tsv",index=False, sep="\t")
+        val.to_csv("data/leave_one_out_testing/" + str(sgrna) + "/dev.tsv",index=False, sep="\t")
+        combined_test.to_csv("data/leave_one_out_testing/" + str(sgrna) + "/test/dev.tsv",index=False, sep="\t")
+
+
+
+    return
+
+
+
+def prep_data_LeaveOneOut_caskas():
+
+    hek293t = pd.read_csv("CasKas_dataset/hek293t_caskas.tsv",sep="\t",header=None)
+    hek293t.columns=["Id","Target Seq_y","Off-target Seq","Label","score","score2"]
+ 
+    unique_values = hek293t["Id"].unique()
+
+
+    hek293t["comb"]  = hek293t.apply(lambda x: encode_seq(x["Target Seq_y"],x["Off-target Seq"]),axis=1)
+    hek293t = hek293t[["comb","Label","Id","score","score2"]]
+    hek293t["comb"] = hek293t.apply(lambda x: seq2kmer(x["comb"],3),axis=1)
+
+    hek293t["score"] = hek293t["score"].apply(string_to_list)
+
+    print(hek293t)
+    hek293t["score"] = hek293t.apply(lambda x: scores2kmerscores(x["score"]),axis=1)
+    ################################################################################
+    hek293t["score2"] = hek293t["score2"].apply(string_to_list)
+    hek293t["score2"] = hek293t.apply(lambda x: scores2kmerscores(x["score2"]),axis=1)
+    ################################################################################
+    hek293t["Label"] = hek293t["Label"].astype(int)
+
+    
+    for sgrna in unique_values:
+
+        print(sgrna)
+        combined_test = hek293t[(hek293t["Id"] == sgrna)]
+        combined_train = hek293t[(hek293t["Id"] != sgrna)]
+
+        combined_train.drop('Id', axis=1, inplace=True)
+        combined_test.drop('Id', axis=1, inplace=True)
+
+        train, val = train_test_split(combined_train, test_size=0.2, random_state=42, stratify=combined_train["Label"])
+
+
+
+        if not os.path.exists("data/leave_one_out_testing_caskas/" + str(sgrna) + "/test"):
+            os.makedirs("data/leave_one_out_testing_caskas/" + str(sgrna) + "/test", exist_ok=True)
+
+            
+        train.to_csv("data/leave_one_out_testing_caskas/" + str(sgrna) + "/train.tsv",index=False, sep="\t")
+        val.to_csv("data/leave_one_out_testing_caskas/" + str(sgrna) + "/dev.tsv",index=False, sep="\t")
+        combined_test.to_csv("data/leave_one_out_testing_caskas/" + str(sgrna) + "/test/dev.tsv",index=False, sep="\t")
+
+
+    return
+
+#gen_random_split(42,3)
+#prep_data_LeaveOneOut()
+prep_data_LeaveOneOut_caskas()

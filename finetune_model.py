@@ -51,7 +51,7 @@ cfg = {
     "adam_epsilon":1e-8,
     "beta1":0.9,
     "beta2":0.999,
-    "output_dir": "simple_test",
+    "output_dir": "outputs/simple_test",
     "patience": 15
     }
 
@@ -126,7 +126,15 @@ def load_and_cache_examples(cfg, task, tokenizer, evaluate=False,do_predict=Fals
     all_attention_mask = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
     all_token_type_ids = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
     all_labels = torch.tensor([f.label for f in features], dtype=torch.long)
-    dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
+    #dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
+
+    if cfg["task_name"] == "dnacrispr":
+        all_feature_a_ids = torch.tensor([f.feature_a_ids for f in features], dtype=torch.long)
+        all_feature_b_ids = torch.tensor([f.feature_b_ids for f in features], dtype=torch.long)
+        dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels, all_feature_a_ids,all_feature_b_ids)
+    else:
+
+        dataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
 
     return dataset
 
@@ -200,6 +208,8 @@ def train(cfg,model,tokenizer):
             model.train()
             batch = tuple(t.to(device) for t in batch)
             inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+            if cfg["task_name"] == "dnacrispr":
+                inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3], "feature_a_ids": batch[4],"feature_b_ids": batch[5]}
 
             outputs = model(**inputs)
          
@@ -319,6 +329,8 @@ def evaluate(cfg, model, tokenizer, prefix="", evaluate=True):
 
         with torch.no_grad():
             inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3]}
+            if cfg["task_name"] == "dnacrispr":
+                inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[3], "feature_a_ids": batch[4],"feature_b_ids": batch[5]}
             outputs = model(**inputs)
             tmp_eval_loss, logits = outputs[:2]
             eval_loss += tmp_eval_loss.mean().item()
@@ -410,6 +422,8 @@ def predict(cfg,model, tokenizer, pred_dir, prefix=""):
     for key in sorted(result.keys()):
         logger.info("  %s = %s", key, str(result[key]))
     # np.save(output_pred_file, probs)
+    
+    return result
 
 
 
