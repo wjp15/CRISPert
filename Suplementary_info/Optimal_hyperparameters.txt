@@ -1,0 +1,18 @@
+
+Range of values for gridsearch
+
+-batch size: [32,64,100,150,128,200,256,300,350,400,512,600,650,700]
+-gradient accumulation steps: [1,2,3]
+-learning rate: [2e-5,2e-4,2e-3,2e-2,2e-1,2e]
+-weight decay: [0,0.005,0.01]
+-dropout: [0,0.1,0.2,0.3,0.4,0.5]
+
+Optimal values found
+
+-batch size: 200
+-gradient accumulation steps: 3
+-learning rate: 2e-4
+-weight decay: 0.01
+-dropout: 0.1
+ 
+
