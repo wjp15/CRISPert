@@ -8,8 +8,9 @@ This repository contains the code for the Crispr off-target detection model CRIS
     
 
 # Setup
+Install modified transformers library (from Huggingface and DNABERT)
 ```
-pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 torchaudio==0.9.0 -f https://download.pytorch.org/whl/torch_stable.html
+python3 -m pip install --editable .
 ```
 
 # Pretrained model
